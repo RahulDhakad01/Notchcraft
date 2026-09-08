@@ -16,11 +16,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Show Swift version
-        run: swift --version
-
-      - name: Build Release
-        run: swift build -c release
+      - name: Select Xcode
+        run: |
+          if [ -d "/Applications/Xcode_16.2.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.2.app
+          elif [ -d "/Applications/Xcode_16.1.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.1.app
+          elif [ -d "/Applications/Xcode_16.0.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.0.app
+          elif [ -d "/Applications/Xcode_16.app" ]; then
+            sudo xcode-select -s /Applications/Xcode_16.app
+          fi
+          xcodebuild -version || true
+          swift --version
 
       - name: Package Universal App
         run: ./scripts/package-release-app.sh
