@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>NotchCraft</string>
+    <key>CFBundleExecutable</key>
+    <string>NotchCraft</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.notchcraft.app</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>NotchCraft</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>NotchCraft uses Apple Events to control Apple Music and work with Apple Notes directly from the notch.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>NotchCraft reads your upcoming events so the notch can show live calendar context and quick planning shortcuts.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>NotchCraft uses your current location to show accurate live weather in the notch when you choose local weather.</string>
+</dict>
+</plist>

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Notch Tool</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="ambient ambient-left"></div>
+    <div class="ambient ambient-right"></div>
+
+    <main class="app-shell">
+      <header class="hero">
+        <p class="eyebrow">Interactive Utility Bar</p>
+        <h1>Desktop-style notch tools for the browser.</h1>
+        <p class="hero-copy">
+          Hover, click, or drop a file on the notch. It expands into a compact
+          control center inspired by the MacBook notch and Dynamic Island.
+        </p>
+      </header>
+
+      <section class="notch-stage">
+        <div class="camera-dot" aria-hidden="true"></div>
+        <section
+          class="notch collapsed"
+          id="notch"
+          aria-label="Interactive notch control center"
+        >
+          <button
+            class="notch-pill"
+            id="notchToggle"
+            aria-expanded="false"
+            aria-controls="notchPanel"
+          >
+            <span class="pill-icon"></span>
+            <span class="pill-title">Notch Tool</span>
+            <span class="pill-status" id="miniStatus">Ready</span>
+          </button>
+
+          <div class="notch-panel" id="notchPanel">
+            <div class="panel-top">
+              <div>
+                <p class="panel-label">Live Activity</p>
+                <h2 id="activityTitle">Focus Timer</h2>
+              </div>
+              <div class="signal-group">
+                <span class="signal-pill" id="clockStatus">00:00</span>
+                <span class="signal-pill" id="batteryStatus">Battery 91%</span>
+              </div>
+            </div>
+
+            <div class="grid">
+              <article class="card card-wide">
+                <p class="card-label">Quick Actions</p>
+                <div class="quick-actions">
+                  <button class="action-chip" data-action="focus">
+                    Start focus
+                  </button>
+                  <button class="action-chip" data-action="break">
+                    Break mode
+                  </button>
+                  <button class="action-chip" data-action="mute">
+                    Toggle mute
+                  </button>
+                </div>
+                <p class="microcopy" id="actionFeedback">
+                  Pick an action to update the island state.
+                </p>
+              </article>
+
+              <article class="card">
+                <p class="card-label">Timer</p>
+                <div class="timer-wrap">
+                  <span class="timer" id="timerValue">25:00</span>
+                  <button class="ghost-button" id="timerToggle">
+                    Start
+                  </button>
+                </div>
+              </article>
+
+              <article class="card">
+                <p class="card-label">Now Playing</p>
+                <div class="media-row">
+                  <div class="album-art"></div>
+                  <div>
+                    <p class="song-title">Night Drive</p>
+                    <p class="song-meta">Lo-fi System</p>
+                  </div>
+                </div>
+              </article>
+
+              <article class="card card-drop" id="dropZone">
+                <p class="card-label">Drop Zone</p>
+                <p class="drop-copy" id="dropMessage">
+                  Drag a file here and the notch will react.
+                </p>
+              </article>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="./script.js"></script>
+  </body>
+</html>

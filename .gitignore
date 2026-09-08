@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+
+# Swift Package Manager
+/.build
+/Packages
+.swiftpm/
+
+# Xcode & Developer data
+xcuserdata/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+
+# Release & Distribution artifacts
+/dist/
+*.dmg
+*.zip
+*.app
+
+# Secrets & Credentials
+.netrc
+*.p12
+*.cer
+*.key
+*.pem
+*.mobileprovision
