@@ -7,6 +7,7 @@
 **A sleek, native macOS notch utility and Dynamic Island control center built with SwiftUI & AppKit.**
 
 [![Platform](https://img.shields.io/badge/platform-macOS%2014.0%2B-black?style=flat-square&logo=apple)](https://www.apple.com/macos/)
+[![Release](https://img.shields.io/github/v/release/RahulDhakad01/Notchcraft?style=flat-square&color=blue)](https://github.com/RahulDhakad01/Notchcraft/releases/latest)
 [![Swift](https://img.shields.io/badge/Swift-6.2-orange?style=flat-square&logo=swift)](https://swift.org/)
 [![Architecture](https://img.shields.io/badge/arch-arm64%20%7C%20x86__64-blue?style=flat-square)](https://apple.com)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -42,7 +43,18 @@
 
 ## 🚀 Getting Started
 
-### Prerequisites
+### Quick Download (Recommended)
+
+Get the latest universal DMG from the [**Releases Page**](https://github.com/RahulDhakad01/Notchcraft/releases/latest):
+1. Download **`NotchCraft-macOS.dmg`**.
+2. Open the disk image and drag **NotchCraft.app** to your `/Applications` folder.
+3. Open **NotchCraft** from Launchpad or Applications.
+
+---
+
+### Building from Source
+
+#### Prerequisites
 
 - macOS 14.0 (Sonoma) or macOS 15.0+ (Sequoia)
 - Xcode 16+ or Swift 6.0+ toolchain
