@@ -1,6 +1,10 @@
 import SwiftUI
 
+/// The standard card: a pane of glass. Pass `tint` to colour it, and `morph` to let it morph into
+/// another card that shares the same name.
 struct GlassCard<Content: View>: View {
+    var tint: Color?
+    var morph: GlassMorph?
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -9,19 +13,6 @@ struct GlassCard<Content: View>: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [.white.opacity(0.07), .white.opacity(0.025)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .strokeBorder(.white.opacity(0.08), lineWidth: 1)
-        )
+        .glassSurface(RoundedRectangle(cornerRadius: 22, style: .continuous), tint: tint, morph: morph)
     }
 }

@@ -44,14 +44,8 @@ struct PermissionPromptView: View {
                 }
                 .padding(14)
                 .frame(width: 292, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .fill(Color.black.opacity(0.95))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                )
+                .background(Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .glassSurface(RoundedRectangle(cornerRadius: 22, style: .continuous))
                 .shadow(color: .black.opacity(0.26), radius: 18, y: 10)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
@@ -69,10 +63,8 @@ private struct PermissionPromptCapsuleButtonStyle: ButtonStyle {
             .foregroundStyle(prominent ? .black : .white)
             .padding(.horizontal, 14)
             .padding(.vertical, 9)
-            .background(
-                Capsule()
-                    .fill(prominent ? Color.mint : Color.white.opacity(0.1))
-            )
+            .background(prominent ? Color.mint : Color.white.opacity(0.1), in: Capsule())
+            .overlay { Capsule().strokeBorder(.white.opacity(prominent ? 0.35 : 0.18), lineWidth: 0.75) }
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
             .opacity(configuration.isPressed ? 0.92 : 1)
     }

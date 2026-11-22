@@ -3,7 +3,10 @@ import Combine
 import EventKit
 import Foundation
 import OSLog
+import SwiftUI
 import UserNotifications
+
+private let webLog = Logger(subsystem: "NotchCraft", category: "WebPlayer")
 
 enum NotchDisplayMode: String, CaseIterable, Identifiable {
     case compact
@@ -114,17 +117,91 @@ struct MusicSnapshot: Equatable {
     var isPlaying: Bool
     var position: Double
     var duration: Double
+    var source: MusicSource = .appleMusic
+    var artworkURL: URL?
+    /// True only when a real, lyric-able track is loaded (not stopped, an ad, or a permission notice).
+    var hasTrack = false
+    /// When `position` was read, so the UI can interpolate smoothly between polls.
+    var capturedAt: Date = .distantPast
 
     static let idle = MusicSnapshot(
-        title: "Apple Music",
-        artist: "Open Music to sync the notch",
+        title: "Now Playing",
+        artist: "Open Apple Music or Spotify",
         album: "",
-        lyricLine: "Playback controls appear here once Music is active.",
+        lyricLine: "Playback controls appear here once music is active.",
         isRunning: false,
         isPlaying: false,
         position: 0,
         duration: 1
     )
+
+    static func idle(for source: MusicSource) -> MusicSnapshot {
+        if source == .web {
+            return MusicSnapshot(
+                title: "Web Player",
+                artist: "Open JioSaavn, Gaana or YouTube Music",
+                album: "",
+                lyricLine: "",
+                isRunning: false,
+                isPlaying: false,
+                position: 0,
+                duration: 1,
+                source: source
+            )
+        }
+
+        if source == .localFile {
+            return MusicSnapshot(
+                title: "Local Files",
+                artist: "Press play to choose a song",
+                album: "",
+                lyricLine: "",
+                isRunning: false,
+                isPlaying: false,
+                position: 0,
+                duration: 1,
+                source: source
+            )
+        }
+
+        return MusicSnapshot(
+            title: source.title,
+            artist: "Open \(source.title) to sync the notch",
+            album: "",
+            lyricLine: "Playback controls appear here once \(source.title) is active.",
+            isRunning: false,
+            isPlaying: false,
+            position: 0,
+            duration: 1,
+            source: source
+        )
+    }
+
+    /// True when `other` is the same song in the same state, with the position only drifting
+    /// along as expected, so there is nothing new to show.
+    func isEquivalent(to other: MusicSnapshot, at date: Date = Date()) -> Bool {
+        guard source == other.source,
+              title == other.title,
+              artist == other.artist,
+              album == other.album,
+              lyricLine == other.lyricLine,
+              isRunning == other.isRunning,
+              isPlaying == other.isPlaying,
+              hasTrack == other.hasTrack,
+              artworkURL == other.artworkURL,
+              abs(duration - other.duration) < 0.5
+        else {
+            return false
+        }
+        return abs(livePosition(at: date) - other.livePosition(at: date)) < 0.6
+    }
+
+    /// Playback position now, extrapolated from the last poll while playing.
+    func livePosition(at date: Date) -> Double {
+        guard isPlaying else { return min(max(position, 0), duration) }
+        let elapsed = max(date.timeIntervalSince(capturedAt), 0)
+        return min(max(position + elapsed, 0), duration)
+    }
 
     var progress: Double {
         guard duration > 0 else { return 0 }
@@ -144,6 +221,8 @@ struct CalendarSnapshot: Equatable {
     var title: String
     var subtitle: String
     var hasUpcomingEvent: Bool
+    /// True once Calendar access is granted, so real events can be shown.
+    var hasAccess = false
 
     static let empty = CalendarSnapshot(
         title: "No events today",
@@ -322,10 +401,61 @@ final class AppState: ObservableObject {
     @Published var launchAtLoginAvailable = false
     @Published var launchAtLoginHelperText = "Turn this on to reopen NotchCraft whenever your Mac starts."
     @Published var music = MusicSnapshot.idle
+    @Published var musicSourcePreference: MusicSourcePreference
+    @Published var lyricsState: LyricsState = .idle
+    @Published var lyricsEnabled: Bool
+    /// Whether Home shows the lyrics panel. Remembered, so the notch reopens where you left it.
+    @Published var showNowPlaying = false {
+        didSet {
+            UserDefaults.standard.set(showNowPlaying, forKey: "showNowPlaying")
+            if showNowPlaying { showCalendarPanel = false }
+        }
+    }
+    @Published var liveActivityEnabled: Bool
+    /// On: cover colours tint the music card, lyrics panel and accents. Off: neutral dark glass.
+    @Published var colorfulThemeEnabled: Bool
+    @Published var musicTint: Color = MusicSource.appleMusic.brandTint
+    @Published var musicArtwork: NSImage?
+    /// Set when the notch is pinned to one app but the other one is the one playing.
+    @Published var suggestedSource: MusicSource?
+    @Published private(set) var notchWidth: CGFloat = 156
+    @Published private(set) var notchHeight: CGFloat = 30
     @Published var weather: WeatherSnapshot
     @Published var weatherLocationChoice: WeatherLocationChoice
     @Published var timerCompletionBanner: TimerCompletionBanner?
     @Published var calendar = CalendarSnapshot.empty
+
+    // Calendar panel: the selected day, the month on show, and the events around them.
+    @Published var calendarSelectedDate = Calendar.current.startOfDay(for: Date())
+    @Published var calendarMonth = Calendar.current.startOfDay(for: Date())
+    @Published var calendarEvents: [CalendarEventItem] = []
+    @Published var calendarChoices: [CalendarChoice] = []
+    @Published var calendarStartsComposing = false
+    @Published var showCalendarPanel = false {
+        didSet {
+            if showCalendarPanel { showNowPlaying = false }
+        }
+    }
+    /// The live events behind `calendarEvents`, so one can be deleted exactly as shown.
+    var calendarEventRefs: [String: EKEvent] = [:]
+    var calendarReloadTask: Task<Void, Never>?
+    /// Notify before events that have no alert of their own in Calendar.
+    @Published var calendarAlertsEnabled = UserDefaults.standard.object(forKey: "calendarAlertsEnabled") as? Bool ?? true
+    /// How long before an event the alert fires (0 = at the start).
+    @Published var calendarAlertLeadMinutes = UserDefaults.standard.object(forKey: "calendarAlertLead") as? Int ?? 10
+    /// Whether macOS lets NotchCraft show notifications (alerts are silent when it is `.denied`).
+    @Published var notificationStatus: UNAuthorizationStatus = .notDetermined
+    /// The browser tab the web player is currently reading, for the notch's controls.
+    private var lastWebTab: WebTab?
+    /// Conversions in progress (or failed) for tray cards, by file.
+    @Published var conversionStates: [UUID: ConversionState] = [:]
+    var conversionTasks: [UUID: Task<Void, Never>] = [:]
+    /// A browser that has a music tab but won't let NotchCraft read it yet.
+    private var webBlockedBrowser: WebBrowser?
+    /// Chooses the browser tab to follow when several have music.
+    private var webArbiter = WebTabArbiter()
+    /// Every tab that was playing at the last look, so starting one can quiet the others.
+    private var webPlayingTabs: [WebTab] = []
     @Published var quickNote: String
     @Published var recentAppleNotes: [AppleNoteSummary]
     @Published var recentApplications: [RecentApplicationSummary]
@@ -340,13 +470,15 @@ final class AppState: ObservableObject {
     @Published var timerMode: SessionTimerMode
     @Published var stopwatchElapsedSeconds: Int
     @Published var stopwatchLaps: [Int]
+    /// Brief status ('Reset', 'Done') shown on the timer card.
+    @Published var timerFlash: String?
     @Published var actionMessage = "Ready to launch your day."
     @Published var currentTime = Date()
 
     let launchers: [LauncherItem]
     let permissionManager: PermissionManager
 
-    private let eventStore = EKEventStore()
+    let eventStore = EKEventStore()
     private let defaults = UserDefaults.standard
     private let pasteboard = NSPasteboard.general
     private let clipboardLimit = 12
@@ -364,6 +496,16 @@ final class AppState: ObservableObject {
     private var clockTimer: Timer?
     private var clipboardTimer: Timer?
     private var musicTimer: Timer?
+    private var lastActiveMusicSource: MusicSource
+    private var lyricsTrackKey = ""
+    private var lyricsTask: Task<Void, Never>?
+    private var lyricsRetryAfter = Date.distantPast
+    private var artworkTrackKey = ""
+    private var focusEndDate: Date?
+    private var stopwatchAnchor: (date: Date, base: Int)?
+    private var timerFlashTask: Task<Void, Never>?
+    private var artworkTask: Task<Void, Never>?
+    private var sourcePlaying: [MusicSource: Bool] = [:]
     private var weatherTimer: Timer?
     private var calendarTimer: Timer?
     private var shelfTimer: Timer?
@@ -387,13 +529,6 @@ final class AppState: ObservableObject {
     private var calendarTimerInterval: TimeInterval?
     private var shelfTimerInterval: TimeInterval?
     private var screenshotTimerInterval: TimeInterval?
-    private lazy var calendarTimeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.timeStyle = .short
-        formatter.dateStyle = .none
-        return formatter
-    }()
-
     init() {
         let storedDisplayMode = NotchDisplayMode(rawValue: defaults.string(forKey: "displayMode") ?? "") ?? .compact
         let storedNote = Self.restoreQuickNote(from: defaults)
@@ -424,6 +559,12 @@ final class AppState: ObservableObject {
         let permissionManager = PermissionManager()
 
         displayMode = storedDisplayMode
+        musicSourcePreference = MusicSourcePreference.restore(from: defaults.string(forKey: "musicSourcePreference"))
+        lyricsEnabled = defaults.object(forKey: "lyricsEnabled") as? Bool ?? true
+        showNowPlaying = defaults.bool(forKey: "showNowPlaying")
+        liveActivityEnabled = defaults.object(forKey: "liveActivityEnabled") as? Bool ?? true
+        colorfulThemeEnabled = defaults.object(forKey: "colorfulThemeEnabled") as? Bool ?? true
+        lastActiveMusicSource = MusicSource(rawValue: defaults.string(forKey: "lastActiveMusicSource") ?? "") ?? .appleMusic
         quickNote = storedNote
         hiddenRecentNoteIDs = storedHiddenRecentNoteIDs
         recentAppleNotes = storedRecentAppleNotes.filter { !storedHiddenRecentNoteIDs.contains($0.noteIdentifier) }
@@ -452,6 +593,22 @@ final class AppState: ObservableObject {
         requestNotificationAccessIfNeeded()
         refreshRecentNotesAsync()
         refreshMonitoringCadence(force: true)
+
+        // Keep the calendar in step with edits made anywhere (Calendar app, iCloud, other devices).
+        NotificationCenter.default.addObserver(
+            forName: .EKEventStoreChanged,
+            object: eventStore,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.scheduleCalendarReload()
+            }
+        }
+
+        // The built-in player reports its own changes (next song, end of queue).
+        LocalFilePlayer.shared.onChange = { [weak self] in
+            self?.scheduleMusicRefresh(delayMilliseconds: 40)
+        }
     }
 
     private static func makeLaunchers() -> [LauncherItem] {
@@ -488,24 +645,112 @@ final class AppState: ObservableObject {
     func setExpanded(_ value: Bool) {
         guard isExpanded != value else { return }
         isExpanded = value
+
+        // Every time the notch opens, the calendar starts on today again.
+        if value {
+            resetCalendarToTodayIfNeeded()
+        }
         refreshMonitoringCadence()
+    }
+
+    /// Until this time, don't auto-close the notch just because the pointer is outside it.
+    /// Collapsing the lyrics panel shrinks the notch under the pointer; that must not close it.
+    var collapseGraceUntil = Date.distantPast
+
+    func keepNotchOpenBriefly(_ seconds: TimeInterval = 2.5) {
+        collapseGraceUntil = Date().addingTimeInterval(seconds)
+    }
+
+    // MARK: Presentation
+
+    enum NotchPresentation: Equatable {
+        /// Nothing playing: the small resting pill.
+        case idle
+        /// Music playing: logo and live bars either side of the hardware notch.
+        case live
+        /// The full notch.
+        case expanded
+    }
+
+    static let liveWing: CGFloat = 46
+
+    var showsLiveActivity: Bool {
+        liveActivityEnabled && music.isRunning && music.isPlaying
+    }
+
+    /// The accent colour views should use: the song's colour, or a neutral in Simple mode.
+    var accentTint: Color {
+        colorfulThemeEnabled ? musicTint : Color(white: 0.88)
+    }
+
+    func setColorfulTheme(_ enabled: Bool) {
+        colorfulThemeEnabled = enabled
+        defaults.set(enabled, forKey: "colorfulThemeEnabled")
+    }
+
+    func setLiveActivityEnabled(_ enabled: Bool) {
+        liveActivityEnabled = enabled
+        defaults.set(enabled, forKey: "liveActivityEnabled")
+    }
+
+    var presentation: NotchPresentation {
+        if isExpanded { return .expanded }
+        guard showsLiveActivity else { return .idle }
+        return .live
+    }
+
+    var presentationSize: CGSize {
+        switch presentation {
+        case .idle:
+            return CGSize(width: 156, height: 28)
+        case .live:
+            return CGSize(width: notchWidth + Self.liveWing * 2, height: notchHeight)
+        case .expanded:
+            return CGSize(width: expandedWidth, height: expandedHeight)
+        }
+    }
+
+    func updateNotchGeometry(width: CGFloat, height: CGFloat) {
+        if notchWidth != width { notchWidth = width }
+        if notchHeight != height { notchHeight = height }
     }
 
     var expandedWidth: CGFloat {
         displayMode.width
     }
 
+    // Every tab shares one height so the notch never jumps between pages.
+    // `chrome` is the padding + toolbar above the content; `contentHeight` is what each tab gets.
+    nonisolated static func chromeHeight(for mode: NotchDisplayMode) -> CGFloat {
+        mode == .compact ? 60 : 68
+    }
+
+    /// The home page has its own, shorter shape: just the three cards.
+    nonisolated static func homeCardHeight(for mode: NotchDisplayMode) -> CGFloat {
+        mode == .compact ? 138 : 146
+    }
+
+    nonisolated static func contentHeight(for mode: NotchDisplayMode) -> CGFloat {
+        mode == .compact ? 184 : 192
+    }
+
+    /// The now-playing panel is taller on purpose: it holds a large cover and lyrics.
+    nonisolated static func nowPlayingHeight(for mode: NotchDisplayMode) -> CGFloat {
+        mode == .compact ? 206 : 218
+    }
+
     var expandedHeight: CGFloat {
-        switch activeSection {
-        case .home:
-            return displayMode == .compact ? 208 : 220
-        case .shelf:
-            return displayMode.height + 12
-        case .focus:
-            return displayMode == .compact ? 214 : 228
-        case .clipboard, .notes, .settings:
-            return displayMode.height
+        let chrome = Self.chromeHeight(for: displayMode)
+
+        if activeSection == .home && (showNowPlaying || showCalendarPanel) {
+            return chrome + Self.nowPlayingHeight(for: displayMode)
         }
+
+        if activeSection == .home {
+            return chrome + Self.homeCardHeight(for: displayMode)
+        }
+
+        return chrome + Self.contentHeight(for: displayMode)
     }
 
     func toggleDisplayMode() {
@@ -550,8 +795,9 @@ final class AppState: ObservableObject {
 
     func resetUIState(reason: String = "UI reset and ready.") {
         timerCompletionBanner = nil
-        pauseFocusTimer()
         activeSection = .home
+        showNowPlaying = false
+        showCalendarPanel = false
         setExpanded(false)
         actionMessage = reason
     }
@@ -791,6 +1037,7 @@ final class AppState: ObservableObject {
 
         pasteboard.clearContents()
         pasteboard.setString(copyText, forType: .string)
+        markPasteboardWriteAsOurs()
         actionMessage = "\(note.title) copied."
     }
 
@@ -923,16 +1170,7 @@ final class AppState: ObservableObject {
         focusSecondsRemaining = focusPreset
         persistTimerState()
         actionMessage = "\(minutes)-minute session loaded."
-        activeSection = .focus
-    }
-
-    func adjustCountdown(byMinutes minutes: Int) {
-        timerMode = .countdown
-        let nextValue = max(60, min(focusSecondsRemaining + (minutes * 60), 4 * 60 * 60))
-        focusSecondsRemaining = nextValue
-        focusPreset = nextValue
-        persistTimerState()
-        actionMessage = "Timer set to \(formattedCountdown(from: nextValue))."
+        flashTimerStatus("\(minutes) min")
     }
 
     func applyCustomCountdown(minutes rawMinutes: String, seconds rawSeconds: String) {
@@ -947,15 +1185,18 @@ final class AppState: ObservableObject {
         focusSecondsRemaining = focusPreset
         persistTimerState()
         actionMessage = "\(formattedCountdown(from: totalSeconds)) countdown ready."
+        flashTimerStatus("Set")
     }
 
+    /// Stops the timer and puts it back to where it started: the countdown's set time, or 00:00.
     func resetActiveTimer() {
         pauseFocusTimer()
+        timerCompletionBanner = nil
 
         switch timerMode {
         case .countdown:
             focusSecondsRemaining = max(focusPreset, 1)
-            actionMessage = "Countdown reset."
+            actionMessage = "Countdown reset to \(formattedCountdown(from: focusSecondsRemaining))."
         case .stopwatch:
             stopwatchElapsedSeconds = 0
             stopwatchLaps.removeAll()
@@ -963,14 +1204,37 @@ final class AppState: ObservableObject {
         }
 
         persistTimerState()
+        performHapticFeedback()
+        flashTimerStatus("Reset")
     }
 
     func recordStopwatchLap() {
         guard timerMode == .stopwatch, stopwatchElapsedSeconds > 0 else { return }
+        // Don't stack two laps on the same second.
+        guard stopwatchLaps.first != stopwatchElapsedSeconds else { return }
         stopwatchLaps.insert(stopwatchElapsedSeconds, at: 0)
-        stopwatchLaps = Array(stopwatchLaps.prefix(4))
+        stopwatchLaps = Array(stopwatchLaps.prefix(6))
         persistTimerState()
         actionMessage = "Lap marked at \(formattedStopwatch())."
+        flashTimerStatus("Lap \(stopwatchLaps.count)")
+    }
+
+    /// Time for each lap on its own (the stored values are running totals).
+    func lapSplits() -> [Int] {
+        stopwatchLaps.enumerated().map { index, total in
+            let previous = index + 1 < stopwatchLaps.count ? stopwatchLaps[index + 1] : 0
+            return max(total - previous, 0)
+        }
+    }
+
+    private func flashTimerStatus(_ text: String) {
+        timerFlash = text
+        timerFlashTask?.cancel()
+        timerFlashTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.4))
+            guard !Task.isCancelled else { return }
+            self?.timerFlash = nil
+        }
     }
 
     func formattedCountdown() -> String {
@@ -1073,6 +1337,7 @@ final class AppState: ObservableObject {
         if !didWriteFileReference {
             pasteboard.setString(file.url.path, forType: .string)
         }
+        markPasteboardWriteAsOurs()
         performHapticFeedback()
         actionMessage = "\(file.url.lastPathComponent) copied for paste."
     }
@@ -1080,6 +1345,7 @@ final class AppState: ObservableObject {
     func copyShelfPath(_ file: ShelfFile) {
         pasteboard.clearContents()
         pasteboard.setString(file.url.path, forType: .string)
+        markPasteboardWriteAsOurs()
         actionMessage = "Path copied for \(file.url.lastPathComponent)."
     }
 
@@ -1116,9 +1382,16 @@ final class AppState: ObservableObject {
         actionMessage = mode.helperText
     }
 
+    /// Clipboard history watches the pasteboard. Copies made from the notch itself must not be
+    /// recorded as new entries (that would reshuffle the list and add tray file paths to it).
+    private func markPasteboardWriteAsOurs() {
+        pasteboardChangeCount = pasteboard.changeCount
+    }
+
     func openClipboardItem(_ item: String) {
         pasteboard.clearContents()
         pasteboard.setString(item, forType: .string)
+        markPasteboardWriteAsOurs()
         actionMessage = "Copied back to clipboard."
     }
 
@@ -1206,33 +1479,414 @@ final class AppState: ObservableObject {
         refreshWeatherStateAsync(forceStatusMessage: true)
     }
 
+    /// The app the notch's buttons currently talk to.
+    var activeMusicSource: MusicSource {
+        let candidates = musicSourcePreference.candidates
+
+        if music.isRunning, candidates.contains(music.source) {
+            return music.source
+        }
+        if candidates.contains(lastActiveMusicSource) {
+            return lastActiveMusicSource
+        }
+        return candidates.first ?? .appleMusic
+    }
+
+    func setMusicSourcePreference(_ preference: MusicSourcePreference) {
+        guard preference != musicSourcePreference else { return }
+        musicSourcePreference = preference
+        defaults.set(preference.rawValue, forKey: "musicSourcePreference")
+
+        suggestedSource = nil
+        lyricsTrackKey = ""
+        lyricsTask?.cancel()
+        lyricsState = .idle
+        refreshMusicStateAsync()
+    }
+
+    func setLyricsEnabled(_ enabled: Bool) {
+        guard enabled != lyricsEnabled else { return }
+        lyricsEnabled = enabled
+        defaults.set(enabled, forKey: "lyricsEnabled")
+        lyricsTrackKey = ""
+        lyricsTask?.cancel()
+        lyricsState = enabled ? .idle : .disabled
+        updateLyrics(for: music)
+    }
+
     func musicPlayPause() {
         activeSection = .home
         setExpanded(true)
-        permissionManager.beginAccessFlow(for: .musicAutomation) { [weak self] in
+        let source = activeMusicSource
+
+        if source.isBuiltIn {
+            localPlayPause()
+            return
+        }
+
+        if source.isWeb {
+            webPlayPause()
+            return
+        }
+
+        Task { [weak self] in
             guard let self else { return }
 
-            if self.music.isPlaying {
-                self.runMusicCommand("pause")
-            } else {
-                self.playMusicFromNotch()
+            // Pressing play with the app closed should simply start it: open the app first, so
+            // its automation permission can be checked (and is usually already granted).
+            if !self.music.isPlaying, !source.isRunning {
+                await self.launchIfNeeded(source)
+                self.keepInBackground(source)
             }
 
-            self.scheduleMusicRefresh(delayMilliseconds: 180)
+            self.withAccess(to: source) { [weak self] in
+                guard let self else { return }
+
+                if self.music.isPlaying && self.music.source == source {
+                    self.runMusicCommand(source.pauseCommand, source: source)
+                } else {
+                    self.playMusicFromNotch(source: source)
+                }
+
+                self.scheduleMusicRefresh(delayMilliseconds: 180)
+            }
+        }
+    }
+
+    /// Runs `action` once the notch is allowed to talk to this player. The built-in player
+    /// needs no permission.
+    private func withAccess(to source: MusicSource, _ action: @escaping @MainActor () -> Void) {
+        guard let permission = source.permission else {
+            action()
+            return
+        }
+        permissionManager.beginAccessFlow(for: permission, onAuthorized: action)
+    }
+
+    // MARK: Local files (built-in player)
+
+    /// Opens the file picker and plays the songs (or folder of songs) you choose.
+    func chooseLocalAudioFiles() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = true
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.resolvesAliases = true
+        panel.prompt = "Play"
+        panel.message = "Choose songs, or a folder of songs, to play from the notch."
+
+        let previousApp = NSWorkspace.shared.frontmostApplication
+        NSApp.activate(ignoringOtherApps: true)
+        let response = panel.runModal()
+
+        // Hand the screen back to whatever you were using.
+        if let previousApp, previousApp != NSRunningApplication.current {
+            previousApp.activate()
+        }
+
+        guard response == .OK else { return }
+        playLocalFiles(panel.urls)
+    }
+
+    /// Plays audio files (and the songs inside folders) with the built-in player.
+    func playLocalFiles(_ urls: [URL]) {
+        let files = LocalFilePlayer.audioFiles(in: urls)
+        guard !files.isEmpty else {
+            actionMessage = "No playable audio files in that selection."
+            return
+        }
+
+        pauseOtherSources(than: .localFile)
+
+        // Make sure the notch is following the built-in player.
+        if !musicSourcePreference.candidates.contains(.localFile) {
+            setMusicSourcePreference(.local)
+        }
+
+        LocalFilePlayer.shared.play(urls: files)
+        activeSection = .home
+        setExpanded(true)
+        actionMessage = files.count == 1 ? "Playing 1 song." : "Playing \(files.count) songs."
+        scheduleMusicRefresh(delayMilliseconds: 30)
+    }
+
+    private func localPlayPause() {
+        let player = LocalFilePlayer.shared
+
+        // Nothing loaded yet: pressing play means "let me pick something".
+        guard player.hasItem else {
+            chooseLocalAudioFiles()
+            return
+        }
+
+        if player.isPlaying {
+            player.pause()
+        } else {
+            pauseOtherSources(than: .localFile)
+            player.play()
+        }
+        scheduleMusicRefresh(delayMilliseconds: 30)
+    }
+
+    private func localSkip(forward: Bool) {
+        let player = LocalFilePlayer.shared
+
+        guard player.hasItem else {
+            chooseLocalAudioFiles()
+            return
+        }
+
+        pauseOtherSources(than: .localFile)
+        if forward { player.next() } else { player.previous() }
+        scheduleMusicRefresh(delayMilliseconds: 30)
+    }
+
+    private func localSeek(to seconds: Double, andPlay play: Bool) {
+        let player = LocalFilePlayer.shared
+        guard player.hasItem else { return }
+
+        let clamped = max(0, min(seconds, music.duration))
+        player.seek(to: clamped)
+
+        if play, !player.isPlaying {
+            pauseOtherSources(than: .localFile)
+            player.play()
+            music.isPlaying = true
+        }
+
+        music.position = clamped
+        music.capturedAt = Date()
+        scheduleMusicRefresh(delayMilliseconds: 120)
+    }
+
+    // MARK: Web players (browser tabs)
+
+    /// What the browsers' music tabs are playing, or `nil` when there is nothing to show.
+    private func webSnapshot() async -> MusicSnapshot? {
+        // Only browsers already allowed are read, so Auto never pops a permission dialog.
+        var allowed: [WebBrowser] = []
+        var states: [String] = []
+        for browser in WebBrowser.allCases where browser.isRunning {
+            let state = await permissionManager.checkPermission(browser.permission)
+            states.append("\(browser.title)=\(state.debugLabel)")
+            if state.allowsFeature(browser.permission) {
+                allowed.append(browser)
+            }
+        }
+
+        // With the Web source chosen, say what is missing instead of staying silent.
+        let strict = musicSourcePreference == .web
+        let waiting = WebBrowser.allCases.first { $0.isRunning && !allowed.contains($0) }
+
+        guard !allowed.isEmpty else {
+            webLog.notice("Web: no allowed browser running [\(states.joined(separator: ", "), privacy: .public)]")
+            lastWebTab = nil
+            webBlockedBrowser = nil
+            if strict, let waiting {
+                return WebPlayerBridge.allowBrowserHintSnapshot(for: waiting)
+            }
+            return nil
+        }
+
+        let result = await Task.detached(priority: .utility) {
+            WebPlayerBridge.read(in: allowed)
+        }.value
+
+        webPlayingTabs = result.readings.filter(\.isPlaying).map(\.tab)
+
+        // Several tabs and browsers can have music: follow the one that started most recently.
+        // If a browser we can't read has a music tab and nothing readable is playing, say so:
+        // the song the user is hearing is probably in that browser.
+        let chosen = webArbiter.choose(from: result.readings)
+        if let blocked = result.blocked, chosen?.isPlaying != true {
+            webLog.notice("Web: \(blocked.shortName, privacy: .public) has a music tab but JavaScript from Apple Events is off")
+            lastWebTab = nil
+            webBlockedBrowser = blocked
+            return WebPlayerBridge.javaScriptHintSnapshot(for: blocked)
+        }
+
+        if let reading = chosen {
+            webLog.notice("Web: \(reading.tab.browser.shortName, privacy: .public) · \(reading.siteName, privacy: .public) · \(reading.title, privacy: .public) playing=\(reading.isPlaying, privacy: .public) of \(result.readings.count, privacy: .public) tab(s) [\(states.joined(separator: ", "), privacy: .public)]\(result.blocked.map { " blocked: " + $0.shortName } ?? "")")
+            lastWebTab = reading.tab
+            webBlockedBrowser = nil
+            return WebPlayerBridge.snapshot(from: reading)
+        }
+
+        lastWebTab = nil
+
+        if let blocked = result.blocked {
+            webLog.notice("Web: \(blocked.title, privacy: .public) needs Allow JavaScript from Apple Events")
+            webBlockedBrowser = blocked
+            return WebPlayerBridge.javaScriptHintSnapshot(for: blocked)
+        }
+
+        webLog.notice("Web: allowed [\(states.joined(separator: ", "), privacy: .public)] but no music tab found")
+        webBlockedBrowser = nil
+        if strict, let waiting {
+            return WebPlayerBridge.allowBrowserHintSnapshot(for: waiting)
+        }
+        return nil
+    }
+
+    private func runWebAction(_ action: WebAction, on tab: WebTab) {
+        Task.detached(priority: .userInitiated) {
+            WebPlayerBridge.perform(action, on: tab)
+        }
+    }
+
+    /// Asks for access to the first running browser that hasn't been allowed yet.
+    func allowWebBrowser(_ browser: WebBrowser) {
+        permissionManager.beginAccessFlow(for: browser.permission) { [weak self] in
+            self?.actionMessage = "\(browser.title) allowed. Turn on Allow JavaScript from Apple Events in it too."
+            self?.scheduleMusicRefresh(delayMilliseconds: 150)
+        }
+    }
+
+    private func startWebAccessFlow() {
+        Task { [weak self] in
+            guard let self else { return }
+
+            let running = WebBrowser.allCases.filter(\.isRunning)
+            guard !running.isEmpty else {
+                self.actionMessage = "Open JioSaavn, Gaana or YouTube Music in your browser, then press play."
+                return
+            }
+
+            for browser in running {
+                let state = await self.permissionManager.checkPermission(browser.permission)
+                if !state.allowsFeature(browser.permission) {
+                    self.allowWebBrowser(browser)
+                    return
+                }
+            }
+
+            if let blocked = self.webBlockedBrowser {
+                self.actionMessage = "\(blocked.javaScriptSwitchHint) — turn it on, then try again."
+            } else {
+                self.actionMessage = "Open a music site in your browser and start a song first."
+            }
+            self.scheduleMusicRefresh(delayMilliseconds: 100)
+        }
+    }
+
+    private func webPlayPause() {
+        guard let tab = lastWebTab else {
+            startWebAccessFlow()
+            return
+        }
+
+        if music.isPlaying {
+            sourcePlaying[.web] = false
+            runWebAction(.pause, on: tab)
+            music.isPlaying = false
+        } else {
+            pauseOtherSources(than: .web)
+            pauseOtherWebTabs(besides: tab)
+            runWebAction(.play, on: tab)
+            music.isPlaying = true
+        }
+
+        music.capturedAt = Date()
+        scheduleMusicRefresh(delayMilliseconds: 450)
+    }
+
+    /// Only one browser tab should make sound: pause any other tab that is playing.
+    private func pauseOtherWebTabs(besides tab: WebTab) {
+        for other in webPlayingTabs where other.browser != tab.browser || other.window != tab.window || other.tab != tab.tab {
+            runWebAction(.pause, on: other)
+        }
+        webPlayingTabs.removeAll { $0.browser != tab.browser || $0.window != tab.window || $0.tab != tab.tab }
+    }
+
+    private func webSkip(forward: Bool) {
+        guard let tab = lastWebTab else {
+            startWebAccessFlow()
+            return
+        }
+
+        runWebAction(forward ? .next : .previous, on: tab)
+        scheduleMusicRefresh(delayMilliseconds: 800)
+    }
+
+    private func webSeek(to seconds: Double, andPlay play: Bool) {
+        guard let tab = lastWebTab else { return }
+
+        let clamped = max(0, min(seconds, music.duration))
+        runWebAction(.seek(clamped), on: tab)
+
+        if play, !music.isPlaying {
+            pauseOtherSources(than: .web)
+            pauseOtherWebTabs(besides: tab)
+            runWebAction(.play, on: tab)
+            music.isPlaying = true
+        }
+
+        music.position = clamped
+        music.capturedAt = Date()
+        scheduleMusicRefresh(delayMilliseconds: 350)
+    }
+
+    /// Opens a closed player hidden, without bringing it to the front.
+    private func launchIfNeeded(_ source: MusicSource) async {
+        guard !source.isRunning,
+              let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: source.bundleIdentifier)
+        else {
+            return
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.hides = true
+        configuration.addsToRecentItems = false
+        _ = try? await NSWorkspace.shared.openApplication(at: url, configuration: configuration)
+    }
+
+    /// Players like Spotify bring their window to the front once they finish loading, even when
+    /// opened hidden. For the first few seconds after we open one, tuck it away again so it
+    /// stays in the Dock and doesn't pull you out of what you're doing.
+    private func keepInBackground(_ source: MusicSource) {
+        Task {
+            let deadline = Date().addingTimeInterval(12)
+            while Date() < deadline {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: source.bundleIdentifier).first else {
+                    continue
+                }
+                if !app.isHidden {
+                    app.hide()
+                }
+            }
         }
     }
 
     func musicNext() {
         activeSection = .home
         setExpanded(true)
-        permissionManager.beginAccessFlow(for: .musicAutomation) { [weak self] in
+        let source = activeMusicSource
+
+        if source.isBuiltIn {
+            localSkip(forward: true)
+            return
+        }
+
+        if source.isWeb {
+            webSkip(forward: true)
+            return
+        }
+
+        withAccess(to: source) { [weak self] in
             guard let self else { return }
 
             guard self.music.isRunning else {
-                self.playMusicFromNotch()
+                self.playMusicFromNotch(source: source)
                 return
             }
-            self.runMusicCommand("next track")
+            guard let command = source.nextCommand else {
+                self.actionMessage = "\(source.title) has no next-track control."
+                return
+            }
+            self.runMusicCommand(command, source: source)
             self.scheduleMusicRefresh()
         }
     }
@@ -1240,15 +1894,67 @@ final class AppState: ObservableObject {
     func musicPrevious() {
         activeSection = .home
         setExpanded(true)
-        permissionManager.beginAccessFlow(for: .musicAutomation) { [weak self] in
+        let source = activeMusicSource
+
+        if source.isBuiltIn {
+            localSkip(forward: false)
+            return
+        }
+
+        if source.isWeb {
+            webSkip(forward: false)
+            return
+        }
+
+        withAccess(to: source) { [weak self] in
             guard let self else { return }
 
             guard self.music.isRunning else {
-                self.playMusicFromNotch()
+                self.playMusicFromNotch(source: source)
                 return
             }
-            self.runMusicCommand("back track")
+            guard let command = source.previousCommand else {
+                self.actionMessage = "\(source.title) has no previous-track control."
+                return
+            }
+            self.runMusicCommand(command, source: source)
             self.scheduleMusicRefresh()
+        }
+    }
+
+    /// Jumps to a point in the song and makes sure it is playing (used when tapping a lyric).
+    func musicSeekAndPlay(to seconds: Double) {
+        guard music.isRunning else { return }
+
+        let source = activeMusicSource
+
+        if source.isBuiltIn {
+            localSeek(to: seconds, andPlay: true)
+            return
+        }
+
+        if source.isWeb {
+            webSeek(to: seconds, andPlay: true)
+            return
+        }
+
+        withAccess(to: source) { [weak self] in
+            guard let self else { return }
+
+            let clamped = max(0, min(seconds, self.music.duration))
+            var commands = [source.seekCommand(toSeconds: clamped)]
+
+            if !self.music.isPlaying {
+                self.pauseOtherSources(than: source)
+                commands.append(source.playCommand)
+                self.music.isPlaying = true
+            }
+
+            // One script, so the seek always lands before play.
+            self.runMusicCommand(commands.joined(separator: "\n"), source: source)
+            self.music.position = clamped
+            self.music.capturedAt = Date()
+            self.scheduleMusicRefresh(delayMilliseconds: 300)
         }
     }
 
@@ -1257,50 +1963,108 @@ final class AppState: ObservableObject {
 
         activeSection = .home
         setExpanded(true)
-        permissionManager.beginAccessFlow(for: .musicAutomation) { [weak self] in
+        let source = activeMusicSource
+
+        if source.isBuiltIn {
+            localSeek(to: seconds, andPlay: false)
+            return
+        }
+
+        if source.isWeb {
+            webSeek(to: seconds, andPlay: false)
+            return
+        }
+
+        withAccess(to: source) { [weak self] in
             guard let self else { return }
 
             let clampedSeconds = max(0, min(seconds, self.music.duration))
-            let secondsText = String(format: "%.2f", clampedSeconds)
-            self.runMusicCommand("set player position to \(secondsText)")
+            self.runMusicCommand(source.seekCommand(toSeconds: clampedSeconds), source: source)
             self.music.position = clampedSeconds
+            self.music.capturedAt = Date()
             self.scheduleMusicRefresh(delayMilliseconds: 120)
         }
     }
 
     private func startFocusTimer() {
+        // Starting a finished countdown begins a fresh one rather than ending instantly.
+        if timerMode == .countdown && focusSecondsRemaining <= 0 {
+            focusSecondsRemaining = max(focusPreset, 1)
+        }
+
+        timerCompletionBanner = nil
         focusIsRunning = true
         actionMessage = timerMode == .countdown ? "Countdown started." : "Stopwatch started."
 
-        focusTimer?.invalidate()
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
+        // Time is read from the clock, not counted tick by tick, so a late tick never loses time.
+        let now = Date()
+        switch timerMode {
+        case .countdown:
+            focusEndDate = now.addingTimeInterval(TimeInterval(focusSecondsRemaining))
+            stopwatchAnchor = nil
+        case .stopwatch:
+            stopwatchAnchor = (now, stopwatchElapsedSeconds)
+            focusEndDate = nil
+        }
 
-                switch self.timerMode {
-                case .countdown:
-                    if self.focusSecondsRemaining > 0 {
-                        self.focusSecondsRemaining -= 1
-                        self.persistTimerState()
-                    } else {
-                        self.pauseFocusTimer()
-                        self.actionMessage = "Session complete. Time to reset."
-                        self.playTimerCompletionFeedback()
-                    }
-                case .stopwatch:
-                    self.stopwatchElapsedSeconds += 1
-                    self.persistTimerState()
-                }
+        focusTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.tickFocusTimer()
             }
         }
+        timer.tolerance = 0.1
         focusTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
 
+    /// Brings the visible numbers in line with the clock.
+    @discardableResult
+    private func syncTimerFromClock() -> Bool {
+        let now = Date()
+
+        switch timerMode {
+        case .countdown:
+            guard let end = focusEndDate else { return false }
+            let remaining = max(Int(ceil(end.timeIntervalSince(now))), 0)
+            if remaining != focusSecondsRemaining {
+                focusSecondsRemaining = remaining
+                persistTimerState()
+            }
+            return remaining == 0
+
+        case .stopwatch:
+            guard let anchor = stopwatchAnchor else { return false }
+            let elapsed = anchor.base + max(Int(now.timeIntervalSince(anchor.date)), 0)
+            if elapsed != stopwatchElapsedSeconds {
+                stopwatchElapsedSeconds = elapsed
+                persistTimerState()
+            }
+            return false
+        }
+    }
+
+    private func tickFocusTimer() {
+        guard focusIsRunning else { return }
+
+        if syncTimerFromClock(), timerMode == .countdown {
+            pauseFocusTimer()
+            actionMessage = "Session complete."
+            flashTimerStatus("Done")
+            playTimerCompletionFeedback()
+        }
+    }
+
     private func pauseFocusTimer() {
+        if focusIsRunning {
+            syncTimerFromClock()
+        }
+
         focusIsRunning = false
         focusTimer?.invalidate()
         focusTimer = nil
+        focusEndDate = nil
+        stopwatchAnchor = nil
         persistTimerState()
     }
 
@@ -1387,7 +2151,9 @@ final class AppState: ObservableObject {
     }
 
     private func updateClockTimer(force: Bool) {
-        let desiredInterval: TimeInterval? = isSystemSleeping ? nil : ((isExpanded && activeSection == .home) ? 1 : 30)
+        // Nothing on screen needs second-by-second time, and every tick re-draws the notch,
+        // so a half-minute beat is enough to keep "Now" labels fresh.
+        let desiredInterval: TimeInterval? = isSystemSleeping ? nil : 30
         guard force || clockTimerInterval != desiredInterval else { return }
 
         installRepeatingTimer(
@@ -1670,26 +2436,218 @@ final class AppState: ObservableObject {
     private func refreshMusicStateAsync() {
         musicRefreshGeneration += 1
         let generation = musicRefreshGeneration
+        let preference = musicSourcePreference
+        let lastSource = lastActiveMusicSource
 
         Task { [weak self] in
             guard let self else { return }
 
-            let permissionState = await self.permissionManager.checkPermission(.musicAutomation)
-            let snapshot: MusicSnapshot
+            let candidates = preference.candidates
 
-            if Self.isMusicRunning, permissionState.allowsFeature(.musicAutomation) {
-                snapshot = await Task.detached(priority: .utility) {
-                    Self.fetchMusicSnapshot()
-                }.value
-            } else if Self.isMusicRunning {
-                snapshot = Self.musicPermissionFallback(for: permissionState)
+            var snapshots: [MusicSnapshot] = []
+            for source in candidates {
+                if source.isBuiltIn {
+                    if let local = LocalFilePlayer.shared.snapshot() {
+                        snapshots.append(local)
+                    }
+                } else if source.isWeb {
+                    if let web = await self.webSnapshot() {
+                        snapshots.append(web)
+                    }
+                } else if source.isRunning {
+                    snapshots.append(await self.snapshot(for: source))
+                }
+            }
+
+            // Choose what the notch shows.
+            // - Exactly one app playing: that one.
+            // - Both playing (Auto): the one that started most recently, else the last one used.
+            // - Nothing playing: the last app used, if it is open.
+            let playing = snapshots.filter(\.isPlaying)
+            let chosen: MusicSnapshot?
+            if playing.count == 1 {
+                chosen = playing.first
+            } else if playing.count > 1 {
+                let newlyStarted = playing.filter { self.sourcePlaying[$0.source] != true }
+                chosen = (newlyStarted.count == 1 ? newlyStarted.first : nil)
+                    ?? playing.first { $0.source == lastSource }
+                    ?? playing.first
             } else {
-                snapshot = .idle
+                chosen = snapshots.first { $0.source == lastSource } ?? snapshots.first
+            }
+
+            // Pinned to one app while the other one is the one making sound.
+            var suggestion: MusicSource?
+            if preference != .auto, chosen?.isPlaying != true {
+                if !candidates.contains(.localFile), LocalFilePlayer.shared.snapshot()?.isPlaying == true {
+                    suggestion = .localFile
+                }
+
+                if suggestion == nil {
+                    for other in MusicSource.allCases where !candidates.contains(other) && other.isRunning {
+                        if await self.snapshot(for: other).isPlaying {
+                            suggestion = other
+                            break
+                        }
+                    }
+                }
             }
 
             guard self.musicRefreshGeneration == generation else { return }
-            self.music = snapshot
+
+            var states: [MusicSource: Bool] = [:]
+            for source in MusicSource.allCases {
+                states[source] = snapshots.first { $0.source == source }?.isPlaying ?? (suggestion == source)
+            }
+            self.sourcePlaying = states
+
+            let snapshot = chosen ?? preference.idleSnapshot
+            // Re-publishing an unchanged song every poll re-draws the whole notch, so only do it
+            // when the song, state or position (beyond normal drift) actually changed.
+            if !self.music.isEquivalent(to: snapshot) {
+                self.music = snapshot
+            }
+            if self.suggestedSource != suggestion {
+                self.suggestedSource = suggestion
+            }
+
+            if snapshot.isRunning, snapshot.source != self.lastActiveMusicSource {
+                self.lastActiveMusicSource = snapshot.source
+                self.defaults.set(snapshot.source.rawValue, forKey: "lastActiveMusicSource")
+            }
+
+            self.updateArtwork(for: snapshot)
+            self.updateLyrics(for: snapshot)
             self.refreshMonitoringCadence()
+        }
+    }
+
+    /// One app's current state, honouring its automation permission.
+    private func snapshot(for source: MusicSource) async -> MusicSnapshot {
+        guard let permission = source.permission else {
+            return LocalFilePlayer.shared.snapshot() ?? .idle(for: source)
+        }
+
+        let permissionState = await permissionManager.checkPermission(permission)
+
+        if permissionState.allowsFeature(permission) {
+            return await Task.detached(priority: .utility) {
+                Self.fetchMusicSnapshot(for: source)
+            }.value
+        }
+
+        return Self.musicPermissionFallback(for: permissionState, source: source)
+    }
+
+    /// Loads cover art and its theme colour as soon as the song changes (even while the notch is
+    /// closed), so the card already has the right look the moment it appears.
+    private func updateArtwork(for snapshot: MusicSnapshot) {
+        guard snapshot.isRunning, snapshot.hasTrack else {
+            artworkTask?.cancel()
+            artworkTrackKey = ""
+            // No song: theme the card with the player's own colour (Spotify green, Apple Music red…).
+            if musicArtwork != nil || musicTint != snapshot.source.brandTint {
+                withAnimation(.easeInOut(duration: 0.4)) {
+                    musicArtwork = nil
+                    musicTint = snapshot.source.brandTint
+                }
+            }
+            return
+        }
+
+        // A song's cover can arrive a moment after its tags, so having one is part of the key.
+        let hasEmbeddedCover = snapshot.source == .localFile && LocalFilePlayer.shared.current?.artwork != nil
+        let key = "\(snapshot.source.rawValue)|\(snapshot.artworkURL?.absoluteString ?? "")|\(snapshot.title)|\(snapshot.artist)|\(snapshot.album)|\(hasEmbeddedCover)"
+        guard key != artworkTrackKey else { return }
+
+        artworkTrackKey = key
+        artworkTask?.cancel()
+
+        artworkTask = Task { [weak self] in
+            var url = snapshot.artworkURL
+            var embedded: NSImage?
+
+            if snapshot.source == .localFile {
+                embedded = LocalFilePlayer.shared.current?.artwork
+            }
+
+            if url == nil, snapshot.source == .appleMusic {
+                // Local songs carry their own cover art inside the file; use that first.
+                embedded = await Task.detached(priority: .utility) { Self.fetchEmbeddedMusicArtwork() }.value
+
+                if embedded == nil {
+                    url = await ArtworkResolver.shared.appleMusicArtwork(
+                        title: snapshot.title,
+                        artist: snapshot.artist,
+                        album: snapshot.album
+                    )
+                }
+            }
+
+            guard !Task.isCancelled, let self, self.artworkTrackKey == key else { return }
+
+            if let embedded {
+                withAnimation(.easeInOut(duration: 0.5)) {
+                    self.musicArtwork = embedded
+                    self.musicTint = ArtworkLoader.tint(of: embedded).map { Color(nsColor: $0) } ?? snapshot.source.brandTint
+                }
+                return
+            }
+
+            guard let url, let loaded = await ArtworkLoader.load(url) else {
+                guard !Task.isCancelled, self.artworkTrackKey == key else { return }
+                withAnimation(.easeInOut(duration: 0.4)) {
+                    self.musicArtwork = nil
+                    self.musicTint = snapshot.source.brandTint
+                }
+                return
+            }
+
+            guard !Task.isCancelled, self.artworkTrackKey == key else { return }
+            withAnimation(.easeInOut(duration: 0.5)) {
+                self.musicArtwork = loaded.image
+                self.musicTint = loaded.tint.map { Color(nsColor: $0) } ?? snapshot.source.brandTint
+            }
+        }
+    }
+
+    private func updateLyrics(for snapshot: MusicSnapshot) {
+        guard lyricsEnabled else {
+            lyricsTask?.cancel()
+            lyricsTrackKey = ""
+            if lyricsState != .disabled { lyricsState = .disabled }
+            return
+        }
+
+        guard snapshot.isRunning, snapshot.hasTrack else {
+            lyricsTask?.cancel()
+            lyricsTrackKey = ""
+            if lyricsState != .idle { lyricsState = .idle }
+            return
+        }
+
+        let key = "\(snapshot.source.rawValue)|\(snapshot.title)|\(snapshot.artist)|\(snapshot.album)|\(Int(snapshot.duration))"
+        let isRetry = lyricsState == .unavailable && Date() >= lyricsRetryAfter
+        guard key != lyricsTrackKey || isRetry else { return }
+
+        lyricsTrackKey = key
+        lyricsTask?.cancel()
+        lyricsState = .loading
+
+        let title = snapshot.title
+        // Local players don't know the artist; search by title alone rather than by "VLC".
+        let artist = (snapshot.source.isLocalPlayer && snapshot.artist == snapshot.source.title) ? "" : snapshot.artist
+        let album = snapshot.album
+        let duration = snapshot.duration
+
+        lyricsTask = Task { [weak self] in
+            let result = await LyricsService.shared.lyrics(title: title, artist: artist, album: album, duration: duration)
+            guard !Task.isCancelled, let self, self.lyricsTrackKey == key else { return }
+
+            if result == .unavailable {
+                self.lyricsRetryAfter = Date().addingTimeInterval(20)
+            }
+            self.lyricsState = result
         }
     }
 
@@ -1773,25 +2731,78 @@ final class AppState: ObservableObject {
             guard let self else { return }
             let permissionState = await self.permissionManager.checkPermission(.calendar)
             self.calendar = self.fetchCalendarSnapshot(for: permissionState)
+            if self.calendar.hasAccess {
+                self.refreshCalendarChoices()
+                self.reloadCalendarEvents()
+            }
         }
     }
 
-    private func playMusicFromNotch() {
+    /// Pauses the other music app so two apps never play over each other.
+    private func pauseOtherSources(than source: MusicSource) {
+        for other in MusicSource.allCases where other != source {
+            if other.isBuiltIn {
+                if LocalFilePlayer.shared.isPlaying { LocalFilePlayer.shared.pause() }
+                continue
+            }
+
+            if other.isWeb {
+                if sourcePlaying[.web] == true {
+                    sourcePlaying[.web] = false
+                    for tab in webPlayingTabs {
+                        runWebAction(.pause, on: tab)
+                    }
+                    webPlayingTabs = []
+                }
+                continue
+            }
+
+            guard other.isRunning, sourcePlaying[other] == true else { continue }
+            sourcePlaying[other] = false
+
+            let script = """
+            tell application "\(other.scriptApplicationName)"
+                \(other.pauseCommand)
+            end tell
+            """
+            Task.detached(priority: .utility) {
+                _ = Self.runAppleScript(script)
+            }
+        }
+    }
+
+    private func playMusicFromNotch(source: MusicSource) {
+        pauseOtherSources(than: source)
+
+        // A player that was just opened ignores commands for a few seconds, so keep trying
+        // until it accepts "play" (up to about 7 seconds).
         let script = """
-        tell application "Music"
+        tell application "\(source.scriptApplicationName)"
             launch
-            play
+            set attempts to 0
+            repeat while attempts < 14
+                try
+                    \(source.playCommand)
+                    exit repeat
+                end try
+                delay 0.5
+                set attempts to attempts + 1
+            end repeat
         end tell
         """
-        Task.detached(priority: .utility) {
-            _ = Self.runAppleScript(script)
+
+        Task { [weak self] in
+            _ = await Task.detached(priority: .utility) {
+                Self.runAppleScript(script, timeout: 20)
+            }.value
+            self?.scheduleMusicRefresh(delayMilliseconds: 400)
         }
         scheduleMusicRefresh(delayMilliseconds: 450)
     }
 
-    private func runMusicCommand(_ command: String) {
+    private func runMusicCommand(_ command: String, source: MusicSource) {
         let script = """
-        tell application "Music"
+        tell application "\(source.scriptApplicationName)"
             launch
             \(command)
         end tell
@@ -1801,15 +2812,83 @@ final class AppState: ObservableObject {
         }
     }
 
-    nonisolated private static var isMusicRunning: Bool {
-        !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Music").isEmpty
+    nonisolated private static let musicScriptHelpers = """
+
+    on sanitize(rawText)
+        set cleanedText to rawText as text
+        set AppleScript's text item delimiters to {return, linefeed, "|||"}
+        set cleanedText to text items of cleanedText
+        set AppleScript's text item delimiters to " "
+        set cleanedText to cleanedText as text
+        set AppleScript's text item delimiters to ""
+        return cleanedText
+    end sanitize
+
+    on lyricPreview(rawLyrics)
+        if rawLyrics is missing value then return ""
+        set cleanedLyrics to my sanitize(rawLyrics)
+        if (count characters of cleanedLyrics) > 84 then
+            return text 1 thru 84 of cleanedLyrics
+        end if
+        return cleanedLyrics
+    end lyricPreview
+    """
+
+    nonisolated private static func fetchMusicSnapshot(for source: MusicSource) -> MusicSnapshot {
+        switch source {
+        case .appleMusic: fetchAppleMusicSnapshot()
+        case .spotify: fetchSpotifySnapshot()
+        case .vlc: fetchLocalPlayerSnapshot(.vlc)
+        case .quickTime: fetchLocalPlayerSnapshot(.quickTime)
+        case .localFile: .idle(for: .localFile)
+        case .web: .idle(for: .web)
+        }
     }
 
-    nonisolated private static func fetchMusicSnapshot() -> MusicSnapshot {
-        guard isMusicRunning else {
-            return .idle
+    /// AppleScript can localize decimals ("12,5"); normalize before parsing.
+    nonisolated private static func parseNumber(_ text: String) -> Double? {
+        Double(text.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: "."))
+    }
+
+    /// The cover art stored inside the current Music track (works for local files too).
+    /// AppleScript hands back raw image bytes, which `osascript` prints as `«data JPEG<hex>»`.
+    nonisolated private static func fetchEmbeddedMusicArtwork() -> NSImage? {
+        let script = """
+        tell application "Music"
+            try
+                return data of artwork 1 of current track
+            end try
+            return ""
+        end tell
+        """
+
+        guard var text = runAppleScript(script, timeout: 5),
+              text.hasPrefix("«data "),
+              text.hasSuffix("»")
+        else {
+            return nil
         }
 
+        text.removeFirst("«data ".count)
+        text.removeLast()
+        // The next four characters are the data type ("JPEG", "PNG "), then the hex bytes.
+        let hex = text.dropFirst(4)
+        guard hex.count >= 16, hex.count % 2 == 0 else { return nil }
+
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(hex.count / 2)
+        var index = hex.startIndex
+        while index < hex.endIndex {
+            let next = hex.index(index, offsetBy: 2)
+            guard let byte = UInt8(hex[index..<next], radix: 16) else { return nil }
+            bytes.append(byte)
+            index = next
+        }
+
+        return NSImage(data: Data(bytes))
+    }
+
+    nonisolated private static func fetchAppleMusicSnapshot() -> MusicSnapshot {
         let script = """
         tell application "Music"
             set stateText to (player state as text)
@@ -1828,43 +2907,16 @@ final class AppState: ObservableObject {
             end try
             return stateText & "|||" & trackName & "|||" & artistName & "|||" & albumName & "|||" & (trackPosition as text) & "|||" & (trackDuration as text) & "|||" & my sanitize(lyricLine)
         end tell
-
-        on sanitize(rawText)
-            set cleanedText to rawText as text
-            set AppleScript's text item delimiters to {return, linefeed, "|||"}
-            set cleanedText to text items of cleanedText
-            set AppleScript's text item delimiters to " "
-            set cleanedText to cleanedText as text
-            set AppleScript's text item delimiters to ""
-            return cleanedText
-        end sanitize
-
-        on lyricPreview(rawLyrics)
-            if rawLyrics is missing value then return ""
-            set cleanedLyrics to my sanitize(rawLyrics)
-            if (count characters of cleanedLyrics) > 84 then
-                return text 1 thru 84 of cleanedLyrics
-            end if
-            return cleanedLyrics
-        end lyricPreview
+        \(musicScriptHelpers)
         """
 
         guard let rawValue = runAppleScript(script) else {
-            return MusicSnapshot(
-                title: "Apple Music",
-                artist: "Music permission needed",
-                album: "",
-                lyricLine: "Allow automation access in macOS so controls can sync.",
-                isRunning: true,
-                isPlaying: false,
-                position: 0,
-                duration: 1
-            )
+            return musicPermissionFallback(for: .notDetermined, source: .appleMusic)
         }
 
         let parts = rawValue.components(separatedBy: "|||")
         guard parts.count >= 7 else {
-            return .idle
+            return .idle(for: .appleMusic)
         }
 
         let state = parts[0]
@@ -1875,8 +2927,153 @@ final class AppState: ObservableObject {
             lyricLine: parts[6].isEmpty ? (parts[3].isEmpty ? "Playback synced with Music." : parts[3]) : parts[6],
             isRunning: true,
             isPlaying: state == "playing",
-            position: Double(parts[4]) ?? 0,
-            duration: max(Double(parts[5]) ?? 1, 1)
+            position: parseNumber(parts[4]) ?? 0,
+            duration: max(parseNumber(parts[5]) ?? 1, 1),
+            source: .appleMusic,
+            artworkURL: nil,
+            hasTrack: state != "stopped",
+            capturedAt: Date()
+        )
+    }
+
+    /// VLC and QuickTime Player play files from disk. They report a file name and timing, not
+    /// artist or album, so "Artist - Title.mp3" style names are split to help the lyrics lookup.
+    nonisolated private static func fetchLocalPlayerSnapshot(_ source: MusicSource) -> MusicSnapshot {
+        let script: String
+        switch source {
+        case .quickTime:
+            script = """
+            tell application "QuickTime Player"
+                if (count of documents) is 0 then return "stopped"
+                set theDocument to document 1
+                return ((playing of theDocument) as text) & "|||" & my sanitize(name of theDocument) & "|||" & ((current time of theDocument) as text) & "|||" & ((duration of theDocument) as text)
+            end tell
+            \(musicScriptHelpers)
+            """
+        default:
+            script = """
+            tell application "VLC"
+                try
+                    set itemName to my sanitize(name of current item)
+                on error
+                    return "stopped"
+                end try
+                return (playing as text) & "|||" & itemName & "|||" & (current time as text) & "|||" & (duration of current item as text)
+            end tell
+            \(musicScriptHelpers)
+            """
+        }
+
+        guard let rawValue = runAppleScript(script) else {
+            return musicPermissionFallback(for: .notDetermined, source: source)
+        }
+
+        let parts = rawValue.components(separatedBy: "|||")
+        guard parts.count >= 4 else {
+            var snapshot = MusicSnapshot.idle(for: source)
+            snapshot.isRunning = true
+            snapshot.artist = "Open a file in \(source.title)"
+            snapshot.capturedAt = Date()
+            return snapshot
+        }
+
+        let (title, artist) = splitLocalFileName(parts[1], fallbackArtist: source.title)
+        return MusicSnapshot(
+            title: title,
+            artist: artist,
+            album: "",
+            lyricLine: "Playing from \(source.title)",
+            isRunning: true,
+            isPlaying: parts[0].lowercased() == "true",
+            position: parseNumber(parts[2]) ?? 0,
+            duration: max(parseNumber(parts[3]) ?? 1, 1),
+            source: source,
+            artworkURL: nil,
+            hasTrack: true,
+            capturedAt: Date()
+        )
+    }
+
+    /// "Artist - Title.mp3" -> ("Title", "Artist"); "Song.m4a" -> ("Song", fallback).
+    nonisolated static func splitLocalFileName(_ rawName: String, fallbackArtist: String) -> (title: String, artist: String) {
+        var name = rawName.trimmingCharacters(in: .whitespaces)
+
+        let ext = (name as NSString).pathExtension
+        if (1...4).contains(ext.count), ext.allSatisfy({ $0.isLetter || $0.isNumber }) {
+            name = (name as NSString).deletingPathExtension
+        }
+
+        if let range = name.range(of: " - ") {
+            let artist = String(name[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
+            let title = String(name[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+            if !artist.isEmpty, !title.isEmpty {
+                return (title, artist)
+            }
+        }
+
+        return (name.isEmpty ? "Untitled" : name, fallbackArtist)
+    }
+
+    nonisolated private static func fetchSpotifySnapshot() -> MusicSnapshot {
+        // Spotify reports duration in milliseconds and position in seconds.
+        let script = """
+        tell application "Spotify"
+            set stateText to (player state as text)
+            if stateText is "stopped" then return "stopped"
+            set currentTrack to current track
+            set trackName to my sanitize(name of currentTrack)
+            set artistName to my sanitize(artist of currentTrack)
+            set albumName to my sanitize(album of currentTrack)
+            set trackDuration to (duration of currentTrack as integer)
+            set trackPosition to (player position as real)
+            set trackID to ""
+            try
+                set trackID to my sanitize(id of currentTrack)
+            end try
+            set artworkLink to ""
+            try
+                set artworkLink to my sanitize(artwork url of currentTrack)
+            end try
+            return stateText & "|||" & trackName & "|||" & artistName & "|||" & albumName & "|||" & (trackPosition as text) & "|||" & (trackDuration as text) & "|||" & trackID & "|||" & artworkLink
+        end tell
+        \(musicScriptHelpers)
+        """
+
+        guard let rawValue = runAppleScript(script) else {
+            return musicPermissionFallback(for: .notDetermined, source: .spotify)
+        }
+
+        if rawValue == "stopped" {
+            var snapshot = MusicSnapshot.idle(for: .spotify)
+            snapshot.isRunning = true
+            snapshot.artist = "Resume your last queue from the notch."
+            snapshot.lyricLine = "Tap play to continue where you left off."
+            snapshot.capturedAt = Date()
+            return snapshot
+        }
+
+        let parts = rawValue.components(separatedBy: "|||")
+        guard parts.count >= 8 else {
+            return .idle(for: .spotify)
+        }
+
+        let isAdvertisement = parts[6].hasPrefix("spotify:ad:")
+        let durationSeconds = max((parseNumber(parts[5]) ?? 1000) / 1000, 1)
+        let artworkURL = URL(string: parts[7]).flatMap { $0.scheme?.hasPrefix("http") == true ? $0 : nil }
+
+        return MusicSnapshot(
+            title: isAdvertisement ? "Advertisement" : (parts[1].isEmpty ? "Spotify" : parts[1]),
+            artist: isAdvertisement ? "Spotify" : (parts[2].isEmpty ? "Unknown Artist" : parts[2]),
+            album: parts[3],
+            lyricLine: parts[3].isEmpty ? "Playback synced with Spotify." : parts[3],
+            isRunning: true,
+            isPlaying: parts[0] == "playing",
+            position: parseNumber(parts[4]) ?? 0,
+            duration: durationSeconds,
+            source: .spotify,
+            artworkURL: artworkURL,
+            hasTrack: !isAdvertisement,
+            capturedAt: Date()
         )
     }
 
@@ -1965,28 +3162,8 @@ final class AppState: ObservableObject {
             )
         }
 
-        let startDate = Date()
-        let endDate = Calendar.current.date(byAdding: .day, value: 1, to: startDate) ?? startDate
-        let predicate = eventStore.predicateForEvents(withStart: startDate, end: endDate, calendars: nil)
-        let nextEvent = eventStore.events(matching: predicate)
-            .filter { $0.endDate >= startDate }
-            .sorted { $0.startDate < $1.startDate }
-            .first
-
-        guard let nextEvent else {
-            return .empty
-        }
-
-        let title = (nextEvent.title?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? "Untitled event"
-        let timeText = nextEvent.isAllDay ? "All-day" : calendarTimeFormatter.string(from: nextEvent.startDate)
-        let sourceTitle = nextEvent.calendar.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let subtitle = sourceTitle.isEmpty ? timeText : "\(timeText) • \(sourceTitle)"
-
-        return CalendarSnapshot(
-            title: title,
-            subtitle: subtitle,
-            hasUpcomingEvent: true
-        )
+        // Events themselves are loaded by `reloadCalendarEvents()`.
+        return CalendarSnapshot(title: "", subtitle: "", hasUpcomingEvent: false, hasAccess: true)
     }
 
     private func pruneExpiredShelfFiles() {
@@ -2185,34 +3362,36 @@ final class AppState: ObservableObject {
         )
     }
 
-    private static func musicPermissionFallback(for state: AppPermissionState) -> MusicSnapshot {
+    nonisolated private static func musicPermissionFallback(for state: AppPermissionState, source: MusicSource) -> MusicSnapshot {
         let artistLine: String
         let lyricLine: String
+        let name = source.title
 
         switch state {
         case .denied:
-            artistLine = "Music permission needed"
+            artistLine = "\(name) permission needed"
             lyricLine = "Allow automation access in System Settings so playback controls can sync."
         case .restricted:
-            artistLine = "Music automation restricted"
-            lyricLine = "This Mac is restricting Apple Music automation for NotchCraft."
+            artistLine = "\(name) automation restricted"
+            lyricLine = "This Mac is restricting \(name) automation for NotchCraft."
         case .unavailable(let reason):
-            artistLine = "Apple Music unavailable"
+            artistLine = "\(name) unavailable"
             lyricLine = reason
         default:
-            artistLine = "Music permission needed"
+            artistLine = "\(name) permission needed"
             lyricLine = "Allow automation access in macOS so controls can sync."
         }
 
         return MusicSnapshot(
-            title: "Apple Music",
+            title: name,
             artist: artistLine,
             album: "",
             lyricLine: lyricLine,
             isRunning: true,
             isPlaying: false,
             position: 0,
-            duration: 1
+            duration: 1,
+            source: source
         )
     }
 
@@ -2518,7 +3697,7 @@ final class AppState: ObservableObject {
         return NSSound(named: NSSound.Name("Glass"))
     }
 
-    nonisolated private static var canUseUserNotifications: Bool {
+    nonisolated static var canUseUserNotifications: Bool {
         Bundle.main.bundleURL.pathExtension == "app" && Bundle.main.bundleIdentifier != nil
     }
 
@@ -2642,7 +3821,7 @@ final class AppState: ObservableObject {
         !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty
     }
 
-    nonisolated private static func runAppleScript(_ source: String, timeout: TimeInterval = 3) -> String? {
+    nonisolated static func runAppleScript(_ source: String, timeout: TimeInterval = 3) -> String? {
         let logger = Logger(subsystem: "NotchCraft", category: "AppleScript")
         let process = Process()
         let outputPipe = Pipe()

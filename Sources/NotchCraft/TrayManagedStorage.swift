@@ -55,6 +55,13 @@ enum TrayManagedStorage {
     static func deleteIfManaged(_ url: URL) {
         guard isManaged(url) else { return }
         try? FileManager.default.removeItem(at: url)
+
+        // Converted files live in their own folder: remove it too once it is empty.
+        let parent = url.deletingLastPathComponent()
+        if parent.lastPathComponent.hasPrefix("converted-"), isManaged(parent.appendingPathComponent("x")),
+           ((try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? []).filter({ !$0.hasPrefix(".") }).isEmpty {
+            try? FileManager.default.removeItem(at: parent)
+        }
     }
 
     static func isManaged(_ url: URL) -> Bool {
@@ -84,5 +91,35 @@ enum TrayManagedStorage {
 
         let baseName = URL(fileURLWithPath: trimmed).deletingPathExtension().lastPathComponent
         return baseName.isEmpty ? nil : baseName
+    }
+}
+
+// MARK: - Converted files
+
+extension TrayManagedStorage {
+    /// A fresh folder inside the tray's storage for one conversion's results, so the files
+    /// keep clean names (`Report.pdf`, not `Report-1A2B3C4D.pdf`).
+    static func makeConversionDirectory() throws -> URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+
+        let directory = appSupport
+            .appendingPathComponent("NotchCraft", isDirectory: true)
+            .appendingPathComponent("TrayImports", isDirectory: true)
+            .appendingPathComponent("converted-\(UUID().uuidString.prefix(8).lowercased())", isDirectory: true)
+
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    /// The file's name without its extension and without the random suffix the tray adds
+    /// when it stores a copy ("Report-1A2B3C4D" -> "Report").
+    static func cleanBaseName(of url: URL) -> String {
+        var name = url.deletingPathExtension().lastPathComponent
+        if let range = name.range(of: #"-[0-9A-Fa-f]{8}$"#, options: .regularExpression) {
+            name.removeSubrange(range)
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Converted" : trimmed
     }
 }
