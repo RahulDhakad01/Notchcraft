@@ -10,6 +10,12 @@ struct TrayFileCardView: View {
     let onCopy: () -> Void
     let onPreview: () -> Void
     let onCopyPath: () -> Void
+    let convertOptions: [ConversionOption]
+    let conversionState: ConversionState?
+    let onConvert: (ConversionOption) -> Void
+    let onCancelConversion: () -> Void
+    let onDismissConversion: () -> Void
+    let onConversionDetails: () -> Void
     let onReveal: () -> Void
     let onOpen: () -> Void
     let onAirDrop: () -> Void
@@ -32,7 +38,9 @@ struct TrayFileCardView: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.94)))
                 }
             }
+            .frame(maxWidth: .infinity)
             .frame(height: 68)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(alignment: .topTrailing) {
                 if let expiryText {
                     Text(expiryText)
@@ -51,17 +59,18 @@ struct TrayFileCardView: View {
         }
         .padding(9)
         .frame(width: 152, height: 104, alignment: .topLeading)
-        .background(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(.white.opacity(isHovering ? 0.08 : 0.045))
-        )
+        .fixedSize()
+        .glassInset(RoundedRectangle(cornerRadius: 22, style: .continuous), fill: isHovering ? 0.09 : 0.05)
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(isHovering ? Color.mint.opacity(0.28) : .white.opacity(0.06), lineWidth: 1)
+                .stroke(isHovering ? Color.mint.opacity(0.3) : .clear, lineWidth: 1)
         )
+        .overlay { conversionOverlay }
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .onTapGesture {
-            onCopy()
+            // While a conversion is showing, taps belong to it.
+            if conversionState == nil { onCopy() }
         }
         .contextMenu {
             Button("Quick Look", systemImage: "eye") {
@@ -75,6 +84,15 @@ struct TrayFileCardView: View {
             }
             Button("Send via AirDrop", systemImage: "airplayaudio") {
                 onAirDrop()
+            }
+            if !convertOptions.isEmpty {
+                Menu("Convert To", systemImage: "arrow.triangle.2.circlepath") {
+                    ForEach(convertOptions) { option in
+                        Button(option.menuTitle) {
+                            onConvert(option)
+                        }
+                    }
+                }
             }
             Divider()
             Button("Copy to Clipboard", systemImage: "doc.on.doc") {
@@ -102,7 +120,11 @@ struct TrayFileCardView: View {
         HStack(spacing: 5) {
             actionButton(systemImage: "doc.on.doc", action: onCopy)
             actionButton(systemImage: "eye", action: onPreview)
-            actionButton(systemImage: "link", action: onCopyPath)
+            if convertOptions.isEmpty {
+                actionButton(systemImage: "link", action: onCopyPath)
+            } else {
+                actionButton(systemImage: "arrow.triangle.2.circlepath", action: showConvertMenu)
+            }
             actionButton(systemImage: "trash", action: onRemove, destructive: true)
         }
         .padding(6)
@@ -120,8 +142,101 @@ struct TrayFileCardView: View {
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(destructive ? Color.red.opacity(0.95) : .white)
                 .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: Converting
+
+    @ViewBuilder
+    private var conversionOverlay: some View {
+        if let conversionState {
+            statusOverlay(conversionState)
+                .transition(.opacity)
+        }
+    }
+
+    /// The formats this file can become, in a standard macOS pop-up menu under the pointer.
+    private func showConvertMenu() {
+        let menu = NSMenu(title: "Convert To")
+        menu.autoenablesItems = false
+
+        let header = NSMenuItem(title: "Convert to", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+
+        let handler = ConvertMenuHandler()
+        for option in convertOptions {
+            let item = NSMenuItem(title: option.target.title, action: #selector(ConvertMenuHandler.choose(_:)), keyEquivalent: "")
+            item.target = handler
+            item.representedObject = ConvertMenuHandler.Choice { onConvert(option) }
+            item.image = NSImage(systemSymbolName: option.target.symbol, accessibilityDescription: option.target.title)
+            if let note = option.note, #available(macOS 14.4, *) { item.subtitle = note }
+            menu.addItem(item)
+        }
+
+        // Blocks until a choice is made or the menu is dismissed.
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+    }
+
+    @ViewBuilder
+    private func statusOverlay(_ state: ConversionState) -> some View {
+        VStack(spacing: 5) {
+            switch state {
+            case .running(let title, let stage):
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(.white)
+
+                Text("Converting to \(title)")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+
+                Text(stage)
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .lineLimit(1)
+
+                Button(action: onCancelConversion) {
+                    Text("Cancel")
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.7))
+
+            case .failed(let message, _):
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.orange)
+
+                Text(message)
+                    .font(.system(size: 9, weight: .medium))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+                    .foregroundStyle(.white.opacity(0.85))
+                    .help(message)
+
+                HStack(spacing: 4) {
+                    Button(action: onConversionDetails) {
+                        Text("Details").padding(.horizontal, 7).padding(.vertical, 3).contentShape(Rectangle())
+                    }
+                    Button(action: onDismissConversion) {
+                        Text("OK").padding(.horizontal, 7).padding(.vertical, 3).contentShape(Rectangle())
+                    }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 9.5, weight: .bold))
+                .foregroundStyle(.mint)
+            }
+        }
+        .padding(10)
+        .frame(width: 152, height: 104)
+        .background(Color.black.opacity(0.88))
     }
 
     @ViewBuilder
@@ -171,11 +286,17 @@ private struct TrayThumbnailSurface: View {
     var body: some View {
         Group {
             if let thumbnail {
-                Image(nsImage: thumbnail)
-                    .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                // Pin the image to the exact size of the preview area. A bare
+                // `.fill` image reports its full scaled size to layout, so tall
+                // or wide thumbnails used to spill outside the card.
+                GeometryReader { proxy in
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             } else {
                 fallbackContent
             }
@@ -197,7 +318,7 @@ private struct TrayThumbnailSurface: View {
                     .font(.system(size: 9, weight: .bold))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
-                    .background(.white.opacity(0.08), in: Capsule())
+                    .glassInset(Capsule(), fill: 0.08)
 
                 Text(fileKindText)
                     .font(.system(size: 10, weight: .semibold))
@@ -260,5 +381,18 @@ private enum TrayThumbnailCache {
 
     static func store(_ image: NSImage, for url: URL) {
         cache.setObject(image, forKey: url as NSURL)
+    }
+}
+
+
+/// Carries the chosen format from an `NSMenu` item back to the card.
+private final class ConvertMenuHandler: NSObject {
+    final class Choice: NSObject {
+        let run: () -> Void
+        init(_ run: @escaping () -> Void) { self.run = run }
+    }
+
+    @objc func choose(_ sender: NSMenuItem) {
+        (sender.representedObject as? Choice)?.run()
     }
 }

@@ -3,7 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$ROOT_DIR/.build/apple/Products/Release"
-DIST_DIR="$ROOT_DIR/dist"
+DIST_DIR="${NOTCHCRAFT_DIST_DIR:-$ROOT_DIR/dist}"
+ENTITLEMENTS_PATH="$ROOT_DIR/scripts/NotchCraft.entitlements"
 APP_NAME="NotchCraft"
 APP_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
@@ -31,7 +32,26 @@ detect_signing_identity() {
 }
 
 echo "Building $APP_NAME as a universal release app..."
-swift build -c release --arch arm64 --arch x86_64 --package-path "$ROOT_DIR"
+if swift build -c release --arch arm64 --arch x86_64 --package-path "$ROOT_DIR"; then
+  :
+else
+  # A universal build needs full Xcode. With only the Command Line Tools, build each
+  # architecture on its own and join them with lipo.
+  echo "Universal build unavailable; building each architecture and joining them with lipo..."
+  LIPO_DIR="$ROOT_DIR/.build/lipo-release"
+  rm -rf "$LIPO_DIR"
+  mkdir -p "$LIPO_DIR"
+  for arch in arm64 x86_64; do
+    swift build -c release --triple "$arch-apple-macosx14.0" --scratch-path "$ROOT_DIR/.build/release-$arch" --package-path "$ROOT_DIR"
+  done
+  lipo -create \
+    "$ROOT_DIR/.build/release-arm64/arm64-apple-macosx/release/$APP_NAME" \
+    "$ROOT_DIR/.build/release-x86_64/x86_64-apple-macosx/release/$APP_NAME" \
+    -output "$LIPO_DIR/$APP_NAME"
+  EXECUTABLE_PATH="$LIPO_DIR/$APP_NAME"
+  RESOURCE_BUNDLE_PATH="$ROOT_DIR/.build/release-arm64/arm64-apple-macosx/release/${APP_NAME}_${APP_NAME}.bundle"
+fi
+lipo -info "$EXECUTABLE_PATH"
 
 echo "Creating app bundle..."
 rm -rf "$APP_DIR"
@@ -47,10 +67,10 @@ chmod +x "$MACOS_DIR/$APP_NAME"
 SIGN_IDENTITY="$(detect_signing_identity || true)"
 if [[ -n "$SIGN_IDENTITY" ]]; then
   echo "Applying signature with: $SIGN_IDENTITY"
-  codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP_DIR"
+  codesign --force --deep --options runtime --timestamp --entitlements "$ENTITLEMENTS_PATH" --sign "$SIGN_IDENTITY" "$APP_DIR"
 else
   echo "No signing identity found. Falling back to ad-hoc signature."
-  codesign --force --deep --sign - "$APP_DIR"
+  codesign --force --deep --entitlements "$ENTITLEMENTS_PATH" --sign - "$APP_DIR"
 fi
 
 echo "Validating signature..."
@@ -62,7 +82,12 @@ ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
 
 echo "Creating DMG archive..."
 rm -f "$DMG_PATH"
-hdiutil create -volname "$APP_NAME" -srcfolder "$APP_DIR" -ov -format UDZO "$DMG_PATH" >/dev/null
+# The disk image shows the app next to a shortcut to Applications, so "drag it across" works.
+DMG_STAGING="$(mktemp -d)"
+cp -R "$APP_DIR" "$DMG_STAGING/"
+ln -s /Applications "$DMG_STAGING/Applications"
+hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_PATH" >/dev/null
+rm -rf "$DMG_STAGING"
 
 echo
 echo "Done."

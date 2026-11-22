@@ -15,17 +15,20 @@ struct NotchRootView: View {
     private let collapseAnimation = Animation.easeOut(duration: 0.16)
 
     var body: some View {
-        let surfaceShape = NotchSurfaceShape(expanded: appState.isExpanded)
+        let presentation = appState.presentation
+        let isCap = presentation == .live
+        // The resting pill is also flat-topped so it never looks like it floats while the window catches up.
+        let surfaceShape = NotchSurfaceShape(expanded: appState.isExpanded, cap: isCap || presentation == .idle)
 
         ZStack(alignment: .top) {
             surfaceShape
-                .fill(appState.isExpanded ? Color.black : Color.black.opacity(0.95))
+                .fill((appState.isExpanded || isCap) ? Color.black : Color.black.opacity(0.95))
                 .overlay(
                     surfaceShape
                         .stroke(Color.white.opacity(0.08), lineWidth: 1)
                 )
                 .overlay(alignment: .top) {
-                    if !appState.isExpanded {
+                    if presentation == .idle {
                         Capsule()
                             .fill(
                                 LinearGradient(
@@ -50,25 +53,24 @@ struct NotchRootView: View {
                             )
                         )
                 } else {
-                    Button {
-                        expandWorkItem?.cancel()
-                        collapseWorkItem?.cancel()
-                        withAnimation(expandAnimation) {
-                            appState.setExpanded(true)
+                    CompactNotchView(appState: appState)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            expandWorkItem?.cancel()
+                            collapseWorkItem?.cancel()
+                            withAnimation(expandAnimation) {
+                                appState.setExpanded(true)
+                            }
+                            onExpansionChange(true)
                         }
-                        onExpansionChange(true)
-                    } label: {
-                        CompactNotchView(appState: appState)
-                    }
-                    .buttonStyle(.plain)
-                    .transition(.opacity)
+                        .transition(.opacity)
                 }
             }
             .padding(.top, appState.isExpanded ? 8 : 0)
-            .padding(.horizontal, appState.isExpanded ? 16 : 6)
-            .padding(.bottom, appState.isExpanded ? 8 : 6)
+            .padding(.horizontal, appState.isExpanded ? 16 : (isCap ? 0 : 6))
+            .padding(.bottom, appState.isExpanded ? 8 : (isCap ? 0 : 6))
         }
-        .frame(width: appState.isExpanded ? appState.expandedWidth : 156, height: appState.isExpanded ? appState.expandedHeight : 28)
+        .frame(width: appState.presentationSize.width, height: appState.presentationSize.height)
         .clipShape(surfaceShape)
         .scaleEffect(isTargeted ? 1.01 : 1)
         .overlay {
@@ -110,7 +112,7 @@ struct NotchRootView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .shadow(color: .black.opacity(appState.isExpanded ? 0.0 : 0.45), radius: 30, y: 14)
+        .shadow(color: .black.opacity((appState.isExpanded || isCap) ? 0.0 : 0.45), radius: 30, y: 14)
         .onHover { hovering in
             handleHoverChange(hovering)
         }
@@ -130,6 +132,18 @@ struct NotchRootView: View {
         .onChange(of: appState.activeSection) { _, _ in
             onExpansionChange(appState.isExpanded)
         }
+        .onChange(of: appState.showNowPlaying) { _, _ in
+            onExpansionChange(appState.isExpanded)
+        }
+        .onChange(of: appState.showCalendarPanel) { _, _ in
+            onExpansionChange(appState.isExpanded)
+        }
+        .onChange(of: appState.presentation) { _, _ in
+            onExpansionChange(appState.isExpanded)
+        }
+        .onChange(of: appState.notchWidth) { _, _ in
+            onExpansionChange(appState.isExpanded)
+        }
         .onChange(of: appState.timerCompletionBanner) { _, banner in
             guard banner != nil else { return }
 
@@ -141,6 +155,9 @@ struct NotchRootView: View {
 
             onExpansionChange(true)
         }
+        // The window resizes slightly out of step with this view. Pin the notch to the top
+        // edge so no gap ever opens above it while the window grows or shrinks.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
@@ -155,6 +172,7 @@ struct NotchRootView: View {
         isHovering = hovering
 
         if hovering {
+            appState.collapseGraceUntil = .distantPast
             scheduleExpansion()
             return
         }
@@ -189,6 +207,11 @@ struct NotchRootView: View {
 
         let workItem = DispatchWorkItem {
             guard !isTargeted && !isHovering else { return }
+
+            if Date() < appState.collapseGraceUntil {
+                scheduleCollapse(delay: 0.25)
+                return
+            }
 
             if isPointerInsideOverlay() {
                 scheduleCollapse(delay: 0.12)

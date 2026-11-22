@@ -2,13 +2,15 @@ import SwiftUI
 
 struct NotchSurfaceShape: Shape {
     var expanded: Bool
+    /// Flat-topped pill that hangs from the top edge (live state).
+    var cap = false
 
     func path(in rect: CGRect) -> Path {
-        if !expanded {
+        if !expanded && !cap {
             return RoundedRectangle(cornerRadius: 20, style: .continuous).path(in: rect)
         }
 
-        let bottomRadius: CGFloat = 30
+        let bottomRadius: CGFloat = cap ? min(rect.height / 2, 18) : 30
 
         var path = Path()
         path.move(to: CGPoint(x: rect.minX, y: rect.minY))

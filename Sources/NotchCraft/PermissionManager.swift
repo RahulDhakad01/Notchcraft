@@ -9,6 +9,13 @@ enum AppPermission: String, CaseIterable, Identifiable {
     case calendar
     case location
     case musicAutomation
+    case spotifyAutomation
+    case vlcAutomation
+    case quickTimeAutomation
+    case chromeAutomation
+    case safariAutomation
+    case braveAutomation
+    case edgeAutomation
     case notesAutomation
 
     var id: String { rawValue }
@@ -21,6 +28,20 @@ enum AppPermission: String, CaseIterable, Identifiable {
             return "Location"
         case .musicAutomation:
             return "Apple Music"
+        case .spotifyAutomation:
+            return "Spotify"
+        case .vlcAutomation:
+            return "VLC"
+        case .quickTimeAutomation:
+            return "QuickTime Player"
+        case .chromeAutomation:
+            return "Google Chrome"
+        case .safariAutomation:
+            return "Safari"
+        case .braveAutomation:
+            return "Brave"
+        case .edgeAutomation:
+            return "Microsoft Edge"
         case .notesAutomation:
             return "Apple Notes"
         }
@@ -34,6 +55,20 @@ enum AppPermission: String, CaseIterable, Identifiable {
             return "show live weather for your current location"
         case .musicAutomation:
             return "control Apple Music and sync live playback from the notch"
+        case .spotifyAutomation:
+            return "control Spotify and sync live playback and lyrics from the notch"
+        case .vlcAutomation:
+            return "control VLC and sync playback from the notch"
+        case .quickTimeAutomation:
+            return "control QuickTime Player and sync playback from the notch"
+        case .chromeAutomation:
+            return "read and control music playing in Google Chrome from the notch"
+        case .safariAutomation:
+            return "read and control music playing in Safari from the notch"
+        case .braveAutomation:
+            return "read and control music playing in Brave from the notch"
+        case .edgeAutomation:
+            return "read and control music playing in Microsoft Edge from the notch"
         case .notesAutomation:
             return "save, open, and manage Apple Notes from the notch"
         }
@@ -51,6 +86,20 @@ enum AppPermission: String, CaseIterable, Identifiable {
             return "Location access is off or unavailable. Turn it on in System Settings to keep local weather live."
         case .musicAutomation:
             return "Automation access for Music is off. Turn it on in System Settings so the notch can control playback."
+        case .spotifyAutomation:
+            return "Automation access for Spotify is off. Turn it on in System Settings so the notch can control playback."
+        case .vlcAutomation:
+            return "Automation access for VLC is off. Turn it on in System Settings so the notch can control playback."
+        case .quickTimeAutomation:
+            return "Automation access for QuickTime Player is off. Turn it on in System Settings so the notch can control playback."
+        case .chromeAutomation:
+            return "Automation access for Google Chrome is off. Turn it on in System Settings so the notch can control web music."
+        case .safariAutomation:
+            return "Automation access for Safari is off. Turn it on in System Settings so the notch can control web music."
+        case .braveAutomation:
+            return "Automation access for Brave is off. Turn it on in System Settings so the notch can control web music."
+        case .edgeAutomation:
+            return "Automation access for Microsoft Edge is off. Turn it on in System Settings so the notch can control web music."
         case .notesAutomation:
             return "Automation access for Notes is off. Turn it on in System Settings so the notch can save and open notes."
         }
@@ -64,6 +113,20 @@ enum AppPermission: String, CaseIterable, Identifiable {
             return "Location Services are unavailable right now."
         case .musicAutomation:
             return "Apple Music automation is unavailable right now."
+        case .spotifyAutomation:
+            return "Spotify automation is unavailable right now."
+        case .vlcAutomation:
+            return "VLC automation is unavailable right now."
+        case .quickTimeAutomation:
+            return "QuickTime Player automation is unavailable right now."
+        case .chromeAutomation:
+            return "Google Chrome automation is unavailable right now."
+        case .safariAutomation:
+            return "Safari automation is unavailable right now."
+        case .braveAutomation:
+            return "Brave automation is unavailable right now."
+        case .edgeAutomation:
+            return "Microsoft Edge automation is unavailable right now."
         case .notesAutomation:
             return "Apple Notes automation is unavailable right now."
         }
@@ -75,7 +138,7 @@ enum AppPermission: String, CaseIterable, Identifiable {
             return ["NSCalendarsFullAccessUsageDescription"]
         case .location:
             return ["NSLocationWhenInUseUsageDescription"]
-        case .musicAutomation, .notesAutomation:
+        case .musicAutomation, .spotifyAutomation, .vlcAutomation, .quickTimeAutomation, .chromeAutomation, .safariAutomation, .braveAutomation, .edgeAutomation, .notesAutomation:
             return ["NSAppleEventsUsageDescription"]
         }
     }
@@ -84,6 +147,20 @@ enum AppPermission: String, CaseIterable, Identifiable {
         switch self {
         case .musicAutomation:
             return "com.apple.Music"
+        case .spotifyAutomation:
+            return "com.spotify.client"
+        case .vlcAutomation:
+            return "org.videolan.vlc"
+        case .quickTimeAutomation:
+            return "com.apple.QuickTimePlayerX"
+        case .chromeAutomation:
+            return "com.google.Chrome"
+        case .safariAutomation:
+            return "com.apple.Safari"
+        case .braveAutomation:
+            return "com.brave.Browser"
+        case .edgeAutomation:
+            return "com.microsoft.edgemac"
         case .notesAutomation:
             return "com.apple.Notes"
         case .calendar, .location:
@@ -97,7 +174,7 @@ enum AppPermission: String, CaseIterable, Identifiable {
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
         case .location:
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices")
-        case .musicAutomation, .notesAutomation:
+        case .musicAutomation, .spotifyAutomation, .vlcAutomation, .quickTimeAutomation, .chromeAutomation, .safariAutomation, .braveAutomation, .edgeAutomation, .notesAutomation:
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation")
         }
     }
@@ -177,6 +254,9 @@ struct PermissionPromptContext: Identifiable, Equatable {
                 return "\(permission.title) access is restricted on this Mac, so NotchCraft will safely disable this feature."
             case .unavailable(let reason):
                 return reason
+            case .notDetermined:
+                // The request ran but macOS never answered (no dialog appeared).
+                return "macOS didn't show the \(permission.title) permission dialog. Open System Settings > Privacy & Security and turn NotchCraft on."
             default:
                 return permission.settingsMessage
             }
@@ -207,9 +287,9 @@ struct PermissionPromptContext: Identifiable, Equatable {
         }
 
         switch state {
-        case .denied, .limited:
+        case .denied, .limited, .notDetermined:
             return true
-        case .notDetermined, .authorized, .restricted, .unavailable:
+        case .authorized, .restricted, .unavailable:
             return false
         }
     }
@@ -271,7 +351,7 @@ final class PermissionManager: NSObject, ObservableObject, CLLocationManagerDele
             resolvedState = calendarAuthorizationState()
         case .location:
             resolvedState = locationAuthorizationState()
-        case .musicAutomation, .notesAutomation:
+        case .musicAutomation, .spotifyAutomation, .vlcAutomation, .quickTimeAutomation, .chromeAutomation, .safariAutomation, .braveAutomation, .edgeAutomation, .notesAutomation:
             resolvedState = await determineAutomationState(for: permission, askUserIfNeeded: false)
         }
 
@@ -302,7 +382,7 @@ final class PermissionManager: NSObject, ObservableObject, CLLocationManagerDele
             resolvedState = await requestCalendarPermission()
         case .location:
             resolvedState = await requestLocationPermission()
-        case .musicAutomation, .notesAutomation:
+        case .musicAutomation, .spotifyAutomation, .vlcAutomation, .quickTimeAutomation, .chromeAutomation, .safariAutomation, .braveAutomation, .edgeAutomation, .notesAutomation:
             resolvedState = await determineAutomationState(for: permission, askUserIfNeeded: true)
         }
 
@@ -607,6 +687,12 @@ final class PermissionManager: NSObject, ObservableObject, CLLocationManagerDele
             locationCoordinateContinuation = nil
             continuation.resume(returning: coordinate)
         }
+    }
+
+    /// Whether NotchCraft may control the app with this bundle identifier. With
+    /// `askUserIfNeeded`, macOS shows its permission dialog (the app must be running).
+    nonisolated static func automationState(for bundleIdentifier: String, askUserIfNeeded: Bool) -> AppPermissionState {
+        resolveAutomationState(bundleIdentifier: bundleIdentifier, askUserIfNeeded: askUserIfNeeded)
     }
 
     nonisolated private static func resolveAutomationState(
