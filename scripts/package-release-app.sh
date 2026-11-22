@@ -82,7 +82,12 @@ ditto -c -k --keepParent "$APP_DIR" "$ZIP_PATH"
 
 echo "Creating DMG archive..."
 rm -f "$DMG_PATH"
-hdiutil create -volname "$APP_NAME" -srcfolder "$APP_DIR" -ov -format UDZO "$DMG_PATH" >/dev/null
+# The disk image shows the app next to a shortcut to Applications, so "drag it across" works.
+DMG_STAGING="$(mktemp -d)"
+cp -R "$APP_DIR" "$DMG_STAGING/"
+ln -s /Applications "$DMG_STAGING/Applications"
+hdiutil create -volname "$APP_NAME" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_PATH" >/dev/null
+rm -rf "$DMG_STAGING"
 
 echo
 echo "Done."

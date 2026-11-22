@@ -171,8 +171,9 @@ enum DocumentConverter {
                 let row = components.compactMap { c -> Int? in if case .tableRow(let r) = c.kind { return r }; return nil }.first ?? 0
                 let header = components.contains { if case .tableHeaderRow = $0.kind { return true }; return false }
                 return .tableCell(row: header ? 0 : max(row, 1), column: column, header: header)
-            case .orderedList: depth += 1; ordered = ordered || depth == 1
-            case .unorderedList: depth += 1
+            // The innermost list decides whether this item is numbered or bulleted.
+            case .orderedList: if depth == 0 { ordered = true }; depth += 1
+            case .unorderedList: if depth == 0 { ordered = false }; depth += 1
             case .listItem(let n): if !isItem { ordinal = n; isItem = true }
             case .blockQuote: quoteDepth += 1
             default: break
